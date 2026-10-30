@@ -1,0 +1,670 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken, 
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  collection, 
+  deleteDoc,
+  serverTimestamp 
+} from 'firebase/firestore';
+import { 
+  Users, 
+  ShieldCheck, 
+  User as UserIcon, 
+  Activity, 
+  Calendar, 
+  TrendingUp, 
+  TrendingDown, 
+  Minus, 
+  LogOut, 
+  ChevronRight,
+  ArrowLeft,
+  Scale
+} from 'lucide-react';
+import { 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer 
+} from 'recharts';
+
+// --- Firebase Initialization ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'weight-tracker-default';
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  
+  // Application Data States
+  const [allUsers, setAllUsers] = useState([]);
+  const [allLogs, setAllLogs] = useState([]);
+  
+  // UI and Navigation States
+  const [setupName, setSetupName] = useState('');
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [viewMode, setViewMode] = useState('dashboard'); // 'dashboard' or 'directory'
+  const [viewingUser, setViewingUser] = useState(null); // null = viewing self
+  
+  // Form States
+  const [dateInput, setDateInput] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
+  const [weightInput, setWeightInput] = useState('');
+  
+  // Admin Authentication Modal States
+  const [showAdminModal, setShowAdminModal] = useState(false);
+  const [passcode, setPasscode] = useState('');
+  const [passcodeError, setPasscodeError] = useState(false);
+
+  // 1. Authentication (Firebase Rule 3)
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Authentication Error:", err);
+      }
+    };
+    
+    initAuth();
+
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      if (!currentUser) setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Data Fetching (Firebase Rule 1 & 2 - No complex queries, filter in memory)
+  useEffect(() => {
+    if (!user) return;
+
+    // Fetch all users from public space
+    const usersRef = collection(db, 'artifacts', appId, 'public', 'data', 'wt_users');
+    const unsubUsers = onSnapshot(usersRef, (snap) => {
+      const usersData = [];
+      snap.forEach(d => usersData.push({ id: d.id, ...d.data() }));
+      setAllUsers(usersData);
+      
+      const myProfile = usersData.find(u => u.id === user.uid);
+      setProfile(myProfile || null);
+      setLoading(false);
+    }, err => {
+      console.error("Error fetching users:", err);
+      setLoading(false);
+    });
+
+    // Fetch all logs from public space
+    const logsRef = collection(db, 'artifacts', appId, 'public', 'data', 'wt_logs');
+    const unsubLogs = onSnapshot(logsRef, (snap) => {
+      const logsData = [];
+      snap.forEach(d => logsData.push({ id: d.id, ...d.data() }));
+      setAllLogs(logsData);
+    }, err => {
+      console.error("Error fetching logs:", err);
+    });
+
+    return () => {
+      unsubUsers();
+      unsubLogs();
+    };
+  }, [user]);
+
+  // --- Actions ---
+
+  const handleCreateProfile = async (e) => {
+    e.preventDefault();
+    if (!setupName.trim() || !user) return;
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wt_users', user.uid), {
+        id: user.uid,
+        name: setupName.trim(),
+        createdAt: serverTimestamp()
+      });
+    } catch (err) {
+      console.error("Error creating profile:", err);
+    }
+  };
+
+  const handleAdminLogin = (e) => {
+    e.preventDefault();
+    if (passcode === 'admin123') {
+      setIsAdmin(true);
+      setShowAdminModal(false);
+      setPasscode('');
+      setPasscodeError(false);
+      setViewMode('directory');
+    } else {
+      setPasscodeError(true);
+    }
+  };
+
+  const handleExitAdmin = () => {
+    setIsAdmin(false);
+    setViewMode('dashboard');
+    setViewingUser(null);
+  };
+
+  const activeUid = viewingUser ? viewingUser.id : user?.uid;
+  const activeProfile = viewingUser || profile;
+  const isReadOnly = !!viewingUser;
+
+  // Filter logs for the active user in memory and sort by date descending
+  const filteredLogs = useMemo(() => {
+    return allLogs
+      .filter(log => log.userId === activeUid)
+      .sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [allLogs, activeUid]);
+
+  const handleAddRecord = async (e) => {
+    e.preventDefault();
+    if (!weightInput || isNaN(weightInput) || isReadOnly) return;
+
+    try {
+      // Use combination of UID and Date as Document ID for easy overwrite if same day
+      const logId = `${activeUid}_${dateInput}`;
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wt_logs', logId), {
+        id: logId,
+        userId: activeUid,
+        date: dateInput,
+        weight: parseFloat(weightInput),
+        timestamp: serverTimestamp()
+      });
+      setWeightInput('');
+    } catch (err) {
+      console.error("Error adding log:", err);
+    }
+  };
+
+  const handleDeleteLog = async (logId) => {
+    try {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'wt_logs', logId));
+    } catch (err) {
+      console.error("Error deleting log:", err);
+    }
+  };
+
+  // --- Calculations ---
+
+  const stats = useMemo(() => {
+    if (!filteredLogs.length) return { avg7Days: null, chartData: [], breakdown: {} };
+
+    // 1. Chart Data (Needs to be Ascending order for Recharts)
+    const chartData = [...filteredLogs].reverse().map(l => ({
+      date: new Date(l.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+      weight: l.weight
+    }));
+
+    // 2. 7-Day Rolling Average
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const sevenDaysAgo = new Date(today);
+    sevenDaysAgo.setDate(today.getDate() - 7);
+    
+    const recentLogs = filteredLogs.filter(l => new Date(l.date) >= sevenDaysAgo);
+    const avg7Days = recentLogs.length > 0 
+      ? (recentLogs.reduce((sum, l) => sum + l.weight, 0) / recentLogs.length).toFixed(1) 
+      : null;
+
+    // 3. Monthly & Weekly Breakdown
+    const breakdown = {};
+    filteredLogs.forEach(log => {
+      const d = new Date(log.date);
+      const monthYear = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+      const day = d.getDate();
+      
+      let week = 1;
+      if (day >= 8 && day <= 14) week = 2;
+      else if (day >= 15 && day <= 21) week = 3;
+      else if (day >= 22) week = 4;
+
+      if (!breakdown[monthYear]) breakdown[monthYear] = { 1: [], 2: [], 3: [], 4: [] };
+      breakdown[monthYear][week].push(log.weight);
+    });
+
+    return { avg7Days, chartData, breakdown };
+  }, [filteredLogs]);
+
+  // Compute total logged days count mapping for the directory
+  const logCountsByUserId = useMemo(() => {
+    const counts = {};
+    allLogs.forEach(log => {
+      counts[log.userId] = (counts[log.userId] || 0) + 1;
+    });
+    return counts;
+  }, [allLogs]);
+
+  // --- Render ---
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50">
+        <Activity className="animate-spin text-blue-500 mb-4" size={32} />
+        <div className="text-slate-500 font-medium">Loading Application...</div>
+      </div>
+    );
+  }
+
+  // New User - Profile Setup
+  if (user && !profile) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-200 max-w-md w-full">
+          <div className="flex justify-center mb-6">
+            <div className="bg-blue-100 p-4 rounded-full">
+              <Scale size={32} className="text-blue-600" />
+            </div>
+          </div>
+          <h2 className="text-2xl font-bold text-center text-slate-800 mb-2">Welcome to WeightTracker</h2>
+          <p className="text-slate-500 text-center mb-8">Enter your name to start tracking your daily progress.</p>
+          <form onSubmit={handleCreateProfile}>
+            <input 
+              type="text" 
+              value={setupName}
+              onChange={(e) => setSetupName(e.target.value)}
+              className="w-full p-3.5 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none mb-4 bg-slate-50"
+              placeholder="e.g. John Doe"
+              required
+            />
+            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3.5 rounded-xl transition-all shadow-sm">
+              Create Profile
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 pb-12 font-sans">
+      
+      {/* HEADER */}
+      <header className="bg-white shadow-sm border-b border-slate-200 sticky top-0 z-20">
+        <div className="max-w-6xl mx-auto px-4 md:px-6 py-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold text-xl shadow-inner">
+              {profile?.name ? profile.name.charAt(0).toUpperCase() : 'U'}
+            </div>
+            <div>
+              <h1 className="text-xl font-bold leading-tight">Hello, {profile?.name}</h1>
+              <div className="text-sm text-slate-500 font-medium mt-0.5">
+                Total Logs: {logCountsByUserId[user?.uid] || 0}
+              </div>
+            </div>
+          </div>
+          
+          <div className="flex gap-2">
+            {!isAdmin ? (
+              <button 
+                onClick={() => setShowAdminModal(true)}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-sm font-semibold transition-colors border border-slate-200"
+              >
+                <ShieldCheck size={16} /> Admin Login
+              </button>
+            ) : (
+              <button 
+                onClick={handleExitAdmin}
+                className="flex items-center gap-2 px-4 py-2 bg-red-50 hover:bg-red-100 text-red-600 rounded-lg text-sm font-semibold transition-colors border border-red-200"
+              >
+                <LogOut size={16} /> Exit Admin
+              </button>
+            )}
+          </div>
+        </div>
+      </header>
+
+      {/* ADMIN LOGIN MODAL */}
+      {showAdminModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-white p-6 rounded-2xl shadow-2xl max-w-sm w-full animate-in fade-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 mb-4 text-slate-800">
+              <ShieldCheck className="text-blue-600" size={24} />
+              <h3 className="text-xl font-bold">Admin Authentication</h3>
+            </div>
+            <p className="text-sm text-slate-500 mb-6">Enter the administrator passcode to access the user directory.</p>
+            <form onSubmit={handleAdminLogin}>
+              <input 
+                type="password"
+                value={passcode}
+                onChange={(e) => { setPasscode(e.target.value); setPasscodeError(false); }}
+                className={`w-full p-3.5 border ${passcodeError ? 'border-red-400 bg-red-50' : 'border-slate-300 bg-slate-50'} rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-colors`}
+                placeholder="Passcode"
+                autoFocus
+              />
+              {passcodeError && <p className="text-red-500 text-sm mt-2 font-medium">Incorrect passcode.</p>}
+              <div className="flex gap-3 mt-6">
+                <button 
+                  type="button"
+                  onClick={() => { setShowAdminModal(false); setPasscode(''); setPasscodeError(false); }}
+                  className="flex-1 py-2.5 bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 rounded-xl font-semibold transition-colors"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="submit"
+                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold transition-colors shadow-sm"
+                >
+                  Unlock
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MAIN LAYOUT */}
+      <main className="max-w-6xl mx-auto px-4 md:px-6 py-8">
+        
+        {/* === VIEW: ADMIN DIRECTORY === */}
+        {isAdmin && viewMode === 'directory' && (
+          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+            <div className="flex items-center gap-3 mb-6">
+              <Users className="text-blue-600" size={28} />
+              <h2 className="text-2xl font-bold text-slate-800">User Directory</h2>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {allUsers.map(u => (
+                <div 
+                  key={u.id}
+                  onClick={() => { setViewingUser(u); setViewMode('dashboard'); }}
+                  className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 hover:border-blue-400 hover:shadow-md transition-all cursor-pointer group flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-slate-600 font-bold text-lg border border-slate-200">
+                      {u.name ? u.name.charAt(0).toUpperCase() : '?'}
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-slate-800 group-hover:text-blue-600 transition-colors">{u.name}</h3>
+                      <p className="text-sm text-slate-500 mt-0.5">{logCountsByUserId[u.id] || 0} logged days</p>
+                    </div>
+                  </div>
+                  <ChevronRight size={20} className="text-slate-300 group-hover:text-blue-500 transition-colors" />
+                </div>
+              ))}
+              {allUsers.length === 0 && (
+                <div className="col-span-full p-8 text-center text-slate-500 bg-white rounded-2xl border border-slate-200 shadow-sm">
+                  No users found in the system.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* === VIEW: USER DASHBOARD === */}
+        {viewMode === 'dashboard' && (
+          <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+            
+            {/* Admin Viewing Indicator */}
+            {isReadOnly && (
+              <div className="bg-indigo-50 border border-indigo-200 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm">
+                <div className="flex items-center gap-3 text-indigo-800">
+                  <UserIcon size={20} />
+                  <span className="font-medium">Admin View: Currently inspecting <strong>{activeProfile?.name}</strong>'s data</span>
+                </div>
+                <button 
+                  onClick={() => { setViewingUser(null); setViewMode('directory'); }}
+                  className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-indigo-100 text-indigo-700 rounded-lg text-sm font-semibold border border-indigo-200 transition-colors shadow-sm"
+                >
+                  <ArrowLeft size={16} /> Back to Directory
+                </button>
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              
+              {/* --- LEFT COLUMN: Input, Chart, Table --- */}
+              <div className="lg:col-span-2 space-y-6">
+                
+                {/* Log Weight Form (Disabled if Admin is viewing) */}
+                {!isReadOnly && (
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                    <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+                      <Scale size={20} className="text-blue-500" /> Log Daily Weight
+                    </h3>
+                    <form onSubmit={handleAddRecord} className="flex flex-col sm:flex-row gap-4">
+                      <div className="flex-1">
+                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Date</label>
+                        <input 
+                          type="date" 
+                          value={dateInput} 
+                          onChange={e => setDateInput(e.target.value)}
+                          className="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 bg-slate-50 outline-none transition-shadow"
+                          required
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Weight (kg)</label>
+                        <input 
+                          type="number" 
+                          step="0.1"
+                          value={weightInput} 
+                          onChange={e => setWeightInput(e.target.value)}
+                          placeholder="e.g. 70.5"
+                          className="w-full p-3 border border-slate-300 rounded-xl focus:ring-2 focus:ring-blue-500 bg-slate-50 outline-none transition-shadow"
+                          required
+                        />
+                      </div>
+                      <div className="flex sm:items-end">
+                        <button type="submit" className="w-full sm:w-auto px-6 py-3 bg-slate-800 hover:bg-slate-900 text-white font-semibold rounded-xl transition-colors shadow-sm">
+                          Save Record
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                )}
+
+                {/* Progress Chart */}
+                <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-200">
+                  <h3 className="text-lg font-bold text-slate-800 mb-6 flex items-center gap-2">
+                    <Activity size={20} className="text-green-500" /> Weight Progression Chart
+                  </h3>
+                  {stats.chartData.length > 1 ? (
+                    <div className="h-72 w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={stats.chartData}>
+                          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                          <XAxis 
+                            dataKey="date" 
+                            axisLine={false} 
+                            tickLine={false} 
+                            tick={{fill: '#64748b', fontSize: 12}} 
+                            dy={10} 
+                          />
+                          <YAxis 
+                            domain={['auto', 'auto']} 
+                            axisLine={false} 
+                            tickLine={false} 
+                            tick={{fill: '#64748b', fontSize: 12}} 
+                            dx={-10} 
+                          />
+                          <Tooltip 
+                            contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                            labelStyle={{ fontWeight: 'bold', color: '#1e293b', marginBottom: '4px' }}
+                          />
+                          <Line 
+                            type="monotone" 
+                            dataKey="weight" 
+                            stroke="#3b82f6" 
+                            strokeWidth={3} 
+                            dot={{r: 4, fill: '#3b82f6', strokeWidth: 2, stroke: '#fff'}} 
+                            activeDot={{r: 6}} 
+                          />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  ) : (
+                    <div className="h-72 flex items-center justify-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200 p-6 text-center">
+                      Need at least 2 records to visualize your progress chart.
+                    </div>
+                  )}
+                </div>
+
+                {/* Recent Logs Table */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+                  <div className="p-5 border-b border-slate-200 bg-slate-50/50">
+                    <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                      <Calendar size={20} className="text-purple-500" /> Recent History (Last 7 Logs)
+                    </h3>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-xs uppercase tracking-wider text-slate-500 bg-slate-50">
+                          <th className="p-4 font-semibold">Date</th>
+                          <th className="p-4 font-semibold">Weight (kg)</th>
+                          <th className="p-4 font-semibold">Difference</th>
+                          {!isReadOnly && <th className="p-4 font-semibold text-right">Actions</th>}
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {filteredLogs.slice(0, 7).map((log, i) => {
+                          const prevLog = filteredLogs[i + 1];
+                          let trend = null;
+                          if (prevLog) {
+                            const diff = log.weight - prevLog.weight;
+                            if (diff > 0) trend = <span className="flex items-center text-red-500 text-sm font-semibold"><TrendingUp size={14} className="mr-1.5"/>+{diff.toFixed(1)}</span>;
+                            else if (diff < 0) trend = <span className="flex items-center text-green-500 text-sm font-semibold"><TrendingDown size={14} className="mr-1.5"/>{diff.toFixed(1)}</span>;
+                            else trend = <span className="flex items-center text-slate-400 text-sm font-semibold"><Minus size={14} className="mr-1.5"/>0.0</span>;
+                          }
+
+                          return (
+                            <tr key={log.id} className="hover:bg-slate-50 transition-colors">
+                              <td className="p-4 text-slate-700 font-medium">
+                                {new Date(log.date).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })}
+                              </td>
+                              <td className="p-4">
+                                <span className="font-bold text-slate-800 text-lg">{log.weight}</span>
+                              </td>
+                              <td className="p-4">{trend}</td>
+                              {!isReadOnly && (
+                                <td className="p-4 text-right">
+                                  <button onClick={() => handleDeleteLog(log.id)} className="text-slate-400 hover:text-red-500 text-sm font-medium transition-colors bg-white hover:bg-red-50 px-3 py-1.5 rounded-lg border border-transparent hover:border-red-200">
+                                    Remove
+                                  </button>
+                                </td>
+                              )}
+                            </tr>
+                          );
+                        })}
+                        {filteredLogs.length === 0 && (
+                          <tr>
+                            <td colSpan={isReadOnly ? 3 : 4} className="p-8 text-center text-slate-500">
+                              No logs recorded yet. Start tracking today!
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+
+              {/* --- RIGHT COLUMN: Summaries --- */}
+              <div className="space-y-6">
+                
+                {/* 7-Day Rolling Average */}
+                <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl shadow-md p-6 text-white relative overflow-hidden">
+                  <div className="absolute top-0 right-0 -mt-4 -mr-4 text-white/10">
+                    <Activity size={120} />
+                  </div>
+                  <div className="relative z-10">
+                    <h3 className="text-blue-100 font-semibold mb-2 flex items-center gap-2 text-sm uppercase tracking-wider">
+                      7-Day Rolling Average
+                    </h3>
+                    <div className="flex items-baseline gap-2">
+                      <span className="text-5xl font-bold">{stats.avg7Days || '--'}</span>
+                      <span className="text-blue-200 font-medium text-lg">kg</span>
+                    </div>
+                    <p className="text-blue-200 text-sm mt-3 opacity-90 leading-relaxed">
+                      Average of logs registered within the past 7 days.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Monthly Breakdown */}
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5">
+                  <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+                    <Calendar size={20} className="text-orange-500" /> Monthly Breakdown
+                  </h3>
+                  
+                  <div className="space-y-5">
+                    {Object.keys(stats.breakdown).length > 0 ? (
+                      Object.keys(stats.breakdown).map(monthYear => {
+                        const weeks = stats.breakdown[monthYear];
+                        return (
+                          <div key={monthYear} className="border border-slate-200 rounded-xl overflow-hidden shadow-sm">
+                            <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 font-bold text-slate-700 text-sm flex items-center justify-between">
+                              <span>{monthYear}</span>
+                            </div>
+                            <div className="divide-y divide-slate-100 bg-white">
+                              {/* Iterate strictly through Week 1 to 4 as required */}
+                              {[
+                                { label: 'Week 1', desc: 'Days 1-7', num: 1 }, 
+                                { label: 'Week 2', desc: 'Days 8-14', num: 2 }, 
+                                { label: 'Week 3', desc: 'Days 15-21', num: 3 }, 
+                                { label: 'Week 4', desc: 'Days 22+', num: 4 }
+                              ].map(w => {
+                                const weekLogs = weeks[w.num];
+                                const weekAvg = weekLogs.length > 0 
+                                  ? (weekLogs.reduce((a,b) => a+b, 0) / weekLogs.length).toFixed(1) 
+                                  : null;
+                                
+                                return (
+                                  <div key={w.num} className="flex justify-between items-center px-4 py-3">
+                                    <div className="flex flex-col">
+                                      <span className="text-slate-700 font-semibold text-sm">{w.label}</span>
+                                      <span className="text-slate-400 text-xs">{w.desc}</span>
+                                    </div>
+                                    {weekAvg ? (
+                                      <span className="font-bold text-slate-800 bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-lg">
+                                        {weekAvg} <span className="text-xs text-slate-500 font-normal">kg</span>
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-300 italic text-xs">No logs</span>
+                                    )}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })
+                    ) : (
+                      <div className="text-center text-slate-400 py-8 text-sm border border-dashed border-slate-200 rounded-xl bg-slate-50">
+                        Record logs to see your monthly breakdown.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
