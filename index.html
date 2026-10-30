@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weight Tracker</title>
+    <!-- นำเข้าไลบรารีที่จำเป็นผ่าน CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/recharts/umd/Recharts.js"></script>
+    
+    <!-- Firebase SDK (เวอร์ชัน 8 สำหรับการใช้งานในไฟล์ HTML เดี่ยว) -->
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-firestore.js"></script>
+</head>
+<body class="bg-gray-100 text-gray-800">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = window.Recharts;
+
+        // 1. นำ Firebase Configuration มาวางแทนที่ค่าเหล่านี้
+        // สามารถเอาได้จากเมนู Project Settings ใน Firebase Console
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_MESSAGING_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // เริ่มต้นการทำงานของ Firebase
+        if (!firebase.apps.length) {
+            firebase.initializeApp(firebaseConfig);
+        }
+        const db = firebase.firestore();
+
+        function App() {
+            const [currentUser, setCurrentUser] = useState(null);
+            const [nameInput, setNameInput] = useState("");
+            const [weightInput, setWeightInput] = useState("");
+            const [logs, setLogs] = useState([]);
+            
+            // Admin State
+            const [isAdmin, setIsAdmin] = useState(false);
+            const [adminPasscode, setAdminPasscode] = useState("");
+            const [showAdminPrompt, setShowAdminPrompt] = useState(false);
+            const [allUsers, setAllUsers] = useState([]);
+            const [selectedUserId, setSelectedUserId] = useState(null);
+
+            // ดึงข้อมูลเมื่อมีการล็อกอินหรือเปลี่ยนผู้ใช้ที่ Admin กำลังดู
+            useEffect(() => {
+                const targetUserId = isAdmin && selectedUserId ? selectedUserId : (currentUser ? currentUser.id : null);
+                if (targetUserId) {
+                    const unsubscribe = db.collection("weightLogs")
+                        .where("userId", "==", targetUserId)
+                        .orderBy("timestamp", "desc")
+                        .onSnapshot((snapshot) => {
+                            const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                            setLogs(data);
+                        });
+                    return () => unsubscribe();
+                }
+            }, [currentUser, isAdmin, selectedUserId]);
+
+            // ดึงรายชื่อผู้ใช้ทั้งหมดเมื่อเข้าโหมด Admin
+            useEffect(() => {
+                if (isAdmin) {
+                    const unsubscribe = db.collection("users")
+                        .orderBy("createdAt", "desc")
+                        .onSnapshot((snapshot) => {
+                            const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                            setAllUsers(data);
+                        });
+                    return () => unsubscribe();
+                }
+            }, [isAdmin]);
+
+            const handleLogin = async (e) => {
+                e.preventDefault();
+                if (!nameInput.trim()) return;
+                
+                // ค้นหาว่ามีชื่อนี้ในระบบหรือยัง (จำลองระบบล็อกอินด้วยชื่อ)
+                const userRef = db.collection("users");
+                const snapshot = await userRef.where("name", "==", nameInput.trim()).get();
+                
+                if (snapshot.empty) {
+                    // สร้างผู้ใช้ใหม่
+                    const newUser = { name: nameInput.trim(), createdAt: firebase.firestore.FieldValue.serverTimestamp() };
+                    const docRef = await userRef.add(newUser);
+                    setCurrentUser({ id: docRef.id, ...newUser });
+                } else {
+                    // ใช้ข้อมูลผู้ใช้เดิม
+                    setCurrentUser({ id: snapshot.docs[0].id, ...snapshot.docs[0].data() });
+                }
+            };
+
+            const handleAddWeight = async (e) => {
+                e.preventDefault();
+                if (!weightInput || !currentUser) return;
+                
+                await db.collection("weightLogs").add({
+                    userId: currentUser.id,
+                    weight: parseFloat(weightInput),
+                    date: new Date().toLocaleDateString('th-TH'),
+                    timestamp: firebase.firestore.FieldValue.serverTimestamp()
+                });
+                setWeightInput("");
+            };
+
+            const handleAdminToggle = () => {
+                if (isAdmin) {
+                    setIsAdmin(false);
+                    setSelectedUserId(null);
+                } else {
+                    setShowAdminPrompt(true);
+                }
+            };
+
+            const confirmAdmin = () => {
+                if (adminPasscode === "admin123") {
+                    setIsAdmin(true);
+                    setShowAdminPrompt(false);
+                    setAdminPasscode("");
+                } else {
+                    alert("รหัสผ่านไม่ถูกต้อง");
+                }
+            };
+
+            // การคำนวณข้อมูล (ค่าเฉลี่ย 7 วันล่าสุด)
+            const recentLogs = logs.slice(0, 7).reverse(); // กลับด้านให้แสดงจากเก่าไปใหม่ในกราฟ
+            const avg7Days = recentLogs.length > 0 
+                ? (recentLogs.reduce((sum, log) => sum + log.weight, 0) / recentLogs.length).toFixed(2) 
+                : 0;
+
+            // หน้าจอลงชื่อเข้าใช้
+            if (!currentUser) {
+                return (
+                    <div className="flex items-center justify-center min-h-screen">
+                        <div className="bg-white p-8 rounded-lg shadow-md w-full max-w-sm text-center">
+                            <h1 className="text-2xl font-bold mb-6 text-blue-600">Weight Tracker</h1>
+                            <form onSubmit={handleLogin}>
+                                <input 
+                                    type="text" 
+                                    placeholder="ใส่ชื่อของคุณเพื่อเริ่มใช้งาน" 
+                                    className="w-full border p-2 rounded mb-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                    value={nameInput}
+                                    onChange={(e) => setNameInput(e.target.value)}
+                                />
+                                <button type="submit" className="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700">เข้าสู่ระบบ</button>
+                            </form>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="max-w-4xl mx-auto p-4 py-8">
+                    {/* ส่วนหัวและปุ่ม Admin */}
+                    <div className="flex justify-between items-center mb-8 bg-white p-4 rounded-lg shadow-sm">
+                        <div>
+                            <h1 className="text-2xl font-bold text-gray-800">
+                                {isAdmin ? "Admin Dashboard" : `สวัสดี, ${currentUser.name}`}
+                            </h1>
+                            <p className="text-gray-500 text-sm">
+                                {isAdmin ? "กำลังดูข้อมูลทั้งหมดในระบบ" : "ติดตามการลดน้ำหนักของคุณ"}
+                            </p>
+                        </div>
+                        <button 
+                            onClick={handleAdminToggle}
+                            className={`px-4 py-2 rounded text-sm font-bold text-white ${isAdmin ? 'bg-red-500 hover:bg-red-600' : 'bg-gray-800 hover:bg-gray-900'}`}
+                        >
+                            {isAdmin ? "ออกจากโหมด Admin" : "เข้าสู่โหมด Admin"}
+                        </button>
+                    </div>
+
+                    {/* Popup ยืนยันรหัสผ่าน Admin */}
+                    {showAdminPrompt && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                            <div className="bg-white p-6 rounded-lg shadow-lg w-80 text-center">
+                                <h2 className="text-lg font-bold mb-4">กรุณาใส่รหัสผ่าน</h2>
+                                <input 
+                                    type="password" 
+                                    className="w-full border p-2 rounded mb-4 text-center"
+                                    value={adminPasscode}
+                                    onChange={(e) => setAdminPasscode(e.target.value)}
+                                    placeholder="Passcode"
+                                />
+                                <div className="flex justify-between gap-2">
+                                    <button onClick={() => setShowAdminPrompt(false)} className="w-1/2 bg-gray-300 p-2 rounded">ยกเลิก</button>
+                                    <button onClick={confirmAdmin} className="w-1/2 bg-blue-600 text-white p-2 rounded">ยืนยัน</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Admin Panel: ดูรายชื่อผู้ใช้ */}
+                    {isAdmin && (
+                        <div className="bg-white p-6 rounded-lg shadow-md mb-8">
+                            <h2 className="text-xl font-bold mb-4 border-b pb-2">รายชื่อผู้ใช้ทั้งหมด</h2>
+                            <div className="flex gap-2 overflow-x-auto pb-2">
+                                <button 
+                                    onClick={() => setSelectedUserId(null)}
+                                    className={`px-4 py-2 rounded border whitespace-nowrap ${!selectedUserId ? 'bg-blue-600 text-white' : 'bg-gray-50'}`}
+                                >
+                                    ภาพรวมระบบ
+                                </button>
+                                {allUsers.map(user => (
+                                    <button 
+                                        key={user.id}
+                                        onClick={() => setSelectedUserId(user.id)}
+                                        className={`px-4 py-2 rounded border whitespace-nowrap ${selectedUserId === user.id ? 'bg-blue-600 text-white' : 'bg-gray-50'}`}
+                                    >
+                                        {user.name}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+
+                    {/* ส่วนแสดงข้อมูลหลัก (แสดงเมื่อเป็น User ปกติ หรือ Admin เลือกดูคนใดคนหนึ่งอยู่) */}
+                    {(!isAdmin || selectedUserId) && (
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            
+                            {/* ฟอร์มบันทึกน้ำหนัก (ซ่อนถ้า Admin กำลังดูข้อมูลคนอื่น) */}
+                            {!isAdmin && (
+                                <div className="bg-white p-6 rounded-lg shadow-md md:col-span-1 h-fit">
+                                    <h2 className="text-lg font-bold mb-4">บันทึกน้ำหนักวันนี้</h2>
+                                    <form onSubmit={handleAddWeight}>
+                                        <div className="flex items-center gap-2">
+                                            <input 
+                                                type="number" 
+                                                step="0.1" 
+                                                placeholder="เช่น 65.5" 
+                                                className="w-full border p-2 rounded text-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                value={weightInput}
+                                                onChange={(e) => setWeightInput(e.target.value)}
+                                            />
+                                            <span className="font-bold text-gray-500">กก.</span>
+                                        </div>
+                                        <button type="submit" className="w-full mt-4 bg-green-500 text-white p-2 rounded font-bold hover:bg-green-600">
+                                            บันทึก
+                                        </button>
+                                    </form>
+                                    <div className="mt-6 pt-4 border-t text-center">
+                                        <p className="text-gray-500 text-sm mb-1">ค่าเฉลี่ย 7 วันล่าสุด</p>
+                                        <p className="text-3xl font-bold text-blue-600">{avg7Days} <span className="text-lg">กก.</span></p>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* กราฟและตารางประวัติ */}
+                            <div className={`bg-white p-6 rounded-lg shadow-md ${isAdmin ? 'md:col-span-3' : 'md:col-span-2'}`}>
+                                <h2 className="text-lg font-bold mb-4">แนวโน้ม 7 วันล่าสุด</h2>
+                                
+                                {recentLogs.length > 0 ? (
+                                    <>
+                                        <div className="h-64 mb-6">
+                                            <ResponsiveContainer width="100%" height="100%">
+                                                <LineChart data={recentLogs}>
+                                                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                                    <XAxis dataKey="date" tick={{fontSize: 12}} />
+                                                    <YAxis domain={['dataMin - 1', 'dataMax + 1']} tick={{fontSize: 12}} />
+                                                    <Tooltip />
+                                                    <Line type="monotone" dataKey="weight" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+                                                </LineChart>
+                                            </ResponsiveContainer>
+                                        </div>
+
+                                        <h3 className="font-bold text-gray-700 mb-2 mt-4">ประวัติการบันทึก</h3>
+                                        <div className="overflow-x-auto">
+                                            <table className="w-full text-left border-collapse">
+                                                <thead>
+                                                    <tr className="bg-gray-100">
+                                                        <th className="p-2 border-b">วันที่</th>
+                                                        <th className="p-2 border-b">น้ำหนัก (กก.)</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {logs.map((log) => (
+                                                        <tr key={log.id} className="hover:bg-gray-50">
+                                                            <td className="p-2 border-b text-sm">{log.date}</td>
+                                                            <td className="p-2 border-b font-bold text-gray-700">{log.weight}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </>
+                                ) : (
+                                    <div className="text-center text-gray-400 py-10">ยังไม่มีข้อมูลการบันทึกน้ำหนัก</div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
